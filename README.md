@@ -1,4 +1,4 @@
-# Elasticsearch Process Analyzer
+# Elasticsearch Process Hunter
 
 A tool for analyzing Windows process logs in Elasticsearch to identify suspicious or important processes based on keywords, and visualize their relationships in process trees.
 
@@ -22,8 +22,8 @@ A tool for analyzing Windows process logs in Elasticsearch to identify suspiciou
 
 1. Clone this repository:
    ```bash
-   git clone https://github.com/yourusername/es-process-analyzer.git
-   cd es-process-analyzer
+   git clone https://github.com/hzguendi/es-process-hunter.git
+   cd es-process-hunter
    ```
 
 2. Install the required dependencies:
@@ -219,7 +219,7 @@ python es_process_analyzer.py --list-fields -i ".ds-logs-windows.sysmon_operatio
 
 ## Compatibility and Use Cases
 
-The Elasticsearch Process Analyzer is designed to work with the following data sources:
+The Elasticsearch Process Hunter is designed to work with the following data sources:
 
 ### Compatible Data Sources
 
