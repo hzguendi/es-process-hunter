@@ -217,6 +217,48 @@ List all possible fields/columns in each index without performing any search:
 python es_process_analyzer.py --list-fields -i ".ds-logs-windows.sysmon_operational-*"
 ```
 
+## Compatibility and Use Cases
+
+The Elasticsearch Process Analyzer is designed to work with the following data sources:
+
+### Compatible Data Sources
+
+- **Windows Security Event Logs** (`.ds-logs-system.security-*` indices)
+- **Sysmon Logs** (`.ds-logs-windows.sysmon_operational-*` indices)
+
+### Threat Hunting & Incident Response Applications
+
+This tool is particularly valuable for threat hunting and incident response across various stages of the Cyber Kill Chain and MITRE ATT&CK framework:
+
+- **Initial Access & Execution Detection**: Identify unusual process execution patterns that may indicate initial compromise
+- **Privilege Escalation Analysis**: Track process lineage to detect when low-privilege processes spawn high-privilege children
+- **Defense Evasion Techniques**: Automatically decode obfuscated PowerShell commands (-EncodedCommand flags)
+- **Credential Access**: Find processes associated with credential dumping tools and techniques
+- **Discovery Activities**: Detect reconnaissance activities through command-line analysis
+- **Lateral Movement Tracing**: Follow process chains that indicate movement between systems
+- **Command & Control Communication**: Identify suspicious network connections from processes
+- **Exfiltration Attempts**: Detect unusual data handling processes and their relationships
+
+### Pyramid of Pain Applications
+
+The tool helps analysts tackle various levels of the Pyramid of Pain:
+
+- **Hash Values**: Track specific process hash values of known malicious files
+- **IP Addresses**: Correlate process activities with suspicious network connections
+- **Domain Names**: Link processes to suspicious DNS queries (when using Sysmon DNS events)
+- **Host Artifacts**: Identify suspicious process execution patterns, file paths, and Registry modifications
+- **Tools**: Detect living-off-the-land binaries (LOLBins) and common attack tools through command-line analysis
+- **TTPs**: Visualize complex process trees to understand advanced persistent threat (APT) tactics and techniques
+
+### Real-World Applications
+
+- **SOC Daily Operations**: Quickly investigate alerts related to suspicious process execution
+- **Incident Response**: Reconstruct process execution timelines during security incidents
+- **Threat Hunting**: Proactively search for indicators of compromise in process execution history
+- **Forensic Analysis**: Build comprehensive process trees to understand the full scope of an attack
+- **APT Detection**: Identify sophisticated threat actors using the process relationship analysis
+- **Compliance Monitoring**: Track privileged user activities and administrative actions
+
 ## Output
 
 The script produces two main outputs:
