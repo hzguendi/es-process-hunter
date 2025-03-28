@@ -1038,6 +1038,26 @@ class ESProcessAnalyzer:
         except Exception as e:
             logger.error(f"Failed to export to CSV: {e}")
     
+    def export_tree_to_file(self, all_trees: List[str], output_path: str) -> None:
+        """
+        Export the process trees to a text file.
+        """
+        try:
+            # Create the directory if it doesn't exist
+            os.makedirs(os.path.dirname(output_path), exist_ok=True)
+            
+            # Strip ANSI color codes for clean text output
+            ansi_escape = re.compile(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])')
+            clean_trees = [ansi_escape.sub('', tree) for tree in all_trees]
+            
+            # Write the clean trees to the file
+            with open(output_path, 'w', encoding='utf-8') as f:
+                f.write('\n'.join(clean_trees))
+                
+            logger.info(f"Exported process trees to {output_path}")
+        except Exception as e:
+            logger.error(f"Failed to export process trees to file: {e}")
+    
     def run(self, args=None) -> None:
         """
         Run the full analysis workflow.
@@ -1091,15 +1111,22 @@ class ESProcessAnalyzer:
         
         # Log port display settings
         logger.info(f"Show source ports in tree: {self.config.show_source_port}")
-        logger.info(f"Show destination ports in tree: {self.config.show_dest_port}")         
+        logger.info(f"Show destination ports in tree: {self.config.show_dest_port}")
+        
+        # Store all tree outputs for possible export to file
+        all_trees = []
         
         for i, root_process in enumerate(self.process_trees):
             if i > 0:
                 print("\n" + "-"*80 + "\n")
-            print(self.display_process_tree(
+                all_trees.append("-"*80)
+            
+            tree_output = self.display_process_tree(
                 root_process=root_process,
                 show_cmdline=show_cmdline
-            ))
+            )
+            all_trees.append(tree_output)
+            print(tree_output)
         
         # Generate and display process table
         table = self.generate_process_table()
@@ -1118,6 +1145,12 @@ class ESProcessAnalyzer:
         if output_file:
             self.export_to_csv(table, output_file)
             print(f"\n{Fore.GREEN}Results exported to {output_file}{Style.RESET_ALL}")
+            
+        # Export process trees to file if requested
+        tree_output_file = args.tree_out if args and args.tree_out else self.config.output_format.get("tree_path")
+        if tree_output_file:
+            self.export_tree_to_file(all_trees, tree_output_file)
+            print(f"\n{Fore.GREEN}Process trees exported to {tree_output_file}{Style.RESET_ALL}")
 
 def parse_args():
     """Parse command line arguments."""
@@ -1235,6 +1268,8 @@ Examples:
                            help="Output file path for formatted text results")
     output_group.add_argument("--csv", 
                            help="Export table to CSV with specified filename")
+    output_group.add_argument("--tree-out",
+                           help="Export process tree to plain text file with specified filename (without color codes)")
     
     return parser.parse_args()
 

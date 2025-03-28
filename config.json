@@ -1,7 +1,6 @@
 {
   "search_keywords": [
-    "teamviewer",
-    "anydesk"
+    "svchost"
   ],
   "blacklist_keywords": [
     "chrome",
@@ -30,6 +29,7 @@
     "tree": "text",
     "table": "text",
     "csv_path": "output/output.csv",
+    "tree_path": "output/tree.txt",
     "show_cmdline": true,
     "show_source_port": true,
     "show_dest_port": true

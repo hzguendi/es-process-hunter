@@ -93,6 +93,7 @@ A tool for analyzing Windows process logs in Elasticsearch to identify suspiciou
   - `tree`: Tree output format ("text")
   - `table`: Table output format ("text")
   - `csv_path`: Path for CSV export
+  - `tree_path`: Path for process tree text export (plain text without color formatting)
   - `show_cmdline`: Whether to show command lines in process trees (default: false)
   - `show_source_port`: Whether to show source ports in process trees (default: false)
   - `show_dest_port`: Whether to show destination ports in process trees (default: false)
@@ -144,6 +145,7 @@ python es_process_analyzer.py [options]
 - `--no-show-dest-port`: Don't show destination port in the tree (default)
 - `--show-ports`: Show both source and destination ports (shorthand for --show-source-port --show-dest-port)
 - `--csv`: Export table to CSV with specified filename
+- `--tree-out`: Export process tree to plain text file with specified filename (without color codes)
 - `--timezone`: Override timezone (default: CET)
 - `-c`, `--config`: Path to configuration file (default: config.json)
 
@@ -197,6 +199,11 @@ python es_process_analyzer.py --show-source-port -k "netcat,powershell"
 Search for suspicious processes while excluding common browsers:
 ```bash
 python es_process_analyzer.py -k "cmd.exe,powershell" -b "chrome.exe,firefox.exe,msedge.exe"
+```
+
+Export process trees to a text file for later analysis:
+```bash
+python es_process_analyzer.py --tree-out output/analysis.txt -k "svchost,powershell,rundll32" --show-ports
 ```
 
 Search in specific indices:
