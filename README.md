@@ -69,6 +69,14 @@ A tool for analyzing Windows process logs in Elasticsearch to identify suspiciou
     "tree": "text",
     "table": "text",
     "csv_path": "output.csv"
+  },
+  "lineage": {
+    "fetch": true,
+    "ancestors": true,
+    "descendants": true,
+    "show_in_tree": true,
+    "show_in_table": false,
+    "include_in_csv": true
   }
 }
 ```
@@ -80,6 +88,17 @@ A tool for analyzing Windows process logs in Elasticsearch to identify suspiciou
 - `limit`: Maximum number of results to retrieve
 - `timezone`: Timezone for date displays
 - `output_format`: Configuration for output formats
+  - `tree`: Tree output format ("text")
+  - `table`: Table output format ("text")
+  - `csv_path`: Path for CSV export
+  - `show_cmdline`: Whether to show command lines in process trees (default: false)
+- `lineage`: Process lineage configuration
+  - `fetch`: Whether to fetch process lineage at all (default: true)
+  - `ancestors`: Include parent/ancestor processes (default: true)
+  - `descendants`: Include child/descendant processes (default: true)
+  - `show_in_tree`: Show lineage in process trees (default: true)
+  - `show_in_table`: Show lineage in output table (default: true)
+  - `include_in_csv`: Include lineage in CSV export (default: true)
 
 ## Usage
 
@@ -96,6 +115,24 @@ python es_process_analyzer.py [options]
 - `-k`, `--keywords`: Additional keywords to search for (comma separated)
 - `-l`, `--limit`: Maximum number of results to retrieve
 - `-i`, `--indices`: Elasticsearch indices to search (comma separated)
+
+**Process Lineage Options:**
+- `--lineage`: Enable process lineage fetching (default: on)
+- `--no-lineage`: Disable process lineage fetching (only direct matches)
+- `--ancestors`: Include ancestor (parent) processes in lineage (default: on)
+- `--no-ancestors`: Exclude ancestor (parent) processes from lineage
+- `--descendants`: Include descendant (child) processes in lineage (default: on)
+- `--no-descendants`: Exclude descendant (child) processes from lineage
+- `--lineage-in-tree`: Show lineage in process trees (default: on)
+- `--no-lineage-in-tree`: Don't show lineage in process trees
+- `--lineage-in-table`: Show lineage in process tables (default: on)
+- `--no-lineage-in-table`: Don't show lineage in process tables
+- `--lineage-in-csv`: Include lineage in CSV export (default: on)
+- `--no-lineage-in-csv`: Don't include lineage in CSV export
+
+**Display Options:**
+- `--show-cmdline`: Show command line for each process in the tree
+- `--no-show-cmdline`: Don't show command line in the tree (default)
 - `--csv`: Export table to CSV with specified filename
 - `--timezone`: Override timezone (default: CET)
 - `-c`, `--config`: Path to configuration file (default: config.json)
@@ -115,6 +152,26 @@ python es_process_analyzer.py -d -k "mimikatz,rubeus,secretsdump"
 Search within a specific date range and export to CSV:
 ```bash
 python es_process_analyzer.py -f "2025-01-01" -t "2025-01-31" --csv results.csv
+```
+
+Search without including process lineage (only exact matches):
+```bash
+python es_process_analyzer.py --no-lineage -k "powershell,rundll32"
+```
+
+Search including only parent processes (but not child processes):
+```bash
+python es_process_analyzer.py --ancestors --no-descendants
+```
+
+Show lineage in the tree view but not in the table or CSV export:
+```bash
+python es_process_analyzer.py --lineage-in-tree --no-lineage-in-table --no-lineage-in-csv
+```
+
+Show full command lines in the process tree for better analysis:
+```bash
+python es_process_analyzer.py --show-cmdline -k "powershell,-enc"
 ```
 
 Search in specific indices:

@@ -1,5 +1,6 @@
 {
   "search_keywords": [
+    "taskschd",
     "rundll32",
     "teamviewer",
     "anydesk"
@@ -19,11 +20,20 @@
     ".ds-logs-system.security-*",
     ".ds-logs-windows.sysmon_operational-*"
   ],
-  "limit": 10000,
+  "limit": 1000000,
   "timezone": "CET",
   "output_format": {
     "tree": "text",
     "table": "text",
-    "csv_path": "output/output.csv"
+    "csv_path": "output/output.csv",
+    "show_cmdline": true
+  },
+  "lineage": {
+    "fetch": true,
+    "ancestors": true,
+    "descendants": true,
+    "show_in_tree": true,
+    "show_in_table": false,
+    "include_in_csv": true
   }
 }

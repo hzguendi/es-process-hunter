@@ -42,6 +42,9 @@ logging.basicConfig(
 )
 logger = logging.getLogger("es-process-analyzer")
 
+# Set higher log level for elasticsearch transport to avoid verbose output
+logging.getLogger("elastic_transport.transport").setLevel(logging.WARNING)
+
 @dataclass
 class Process:
     """Class to represent a process with its properties and relationships."""
@@ -74,15 +77,30 @@ class Config:
     limit: int
     timezone: str
     output_format: Dict[str, str]
+    lineage: Dict[str, Any] = field(default_factory=lambda: {
+        "fetch": True,          # Whether to fetch process lineage at all
+        "ancestors": True,      # Include parent processes
+        "descendants": True,    # Include child processes
+        "show_in_tree": True,   # Show lineage in process trees
+        "show_in_table": True,  # Show lineage in the output table
+        "include_in_csv": True  # Include lineage in CSV export
+    })
+    show_cmdline: bool = False  # Whether to show command lines in process trees
 
 class ESProcessAnalyzer:
     """Main class for analyzing processes in Elasticsearch logs."""
     
-    def __init__(self, config_path: str, debug: bool = False):
+    def __init__(self, config_path: str, debug: bool = False, force_show_cmdline: bool = None):
         """Initialize the analyzer with configuration."""
         self.load_env()
         self.load_config(config_path)
         self.setup_logging(debug)
+        
+        # Direct override for command line display if specified
+        if force_show_cmdline is not None:
+            self.config.show_cmdline = force_show_cmdline
+            print(f"FORCED SHOW_CMDLINE TO: {self.config.show_cmdline}")
+            
         self.connect_to_elasticsearch()
         self.processes = {}  # pid -> Process
         self.process_trees = []  # List of root processes
@@ -106,6 +124,65 @@ class ESProcessAnalyzer:
             with open(config_path, 'r') as f:
                 config_data = json.load(f)
                 
+            # Raw config debugging
+            print("\nDUMPING RAW CONFIG:")
+            print(json.dumps(config_data, indent=2))
+            print("\nOUTPUT_FORMAT SECTION:")
+            print(json.dumps(config_data.get('output_format', {}), indent=2))
+            print(f"\nSHOW_CMDLINE IN ROOT: {'show_cmdline' in config_data}")
+            print(f"SHOW_CMDLINE IN OUTPUT_FORMAT: {'show_cmdline' in config_data.get('output_format', {})}")
+                
+            # Default lineage settings
+            default_lineage = {
+                "fetch": True,
+                "ancestors": True,
+                "descendants": True,
+                "show_in_tree": True,
+                "show_in_table": True,
+                "include_in_csv": True
+            }
+            
+            # Load lineage settings from config or use default
+            lineage_config = config_data.get("lineage", {})
+            # For backward compatibility
+            if "include_process_lineage" in config_data:
+                lineage_config["fetch"] = config_data["include_process_lineage"]
+                
+            # Merge with defaults (keeping provided values)
+            for key, default_value in default_lineage.items():
+                if key not in lineage_config:
+                    lineage_config[key] = default_value
+            
+            # Load output format and display settings
+            output_format = config_data.get("output_format", {})
+            print(f"RAW OUTPUT_FORMAT TYPE: {type(output_format)}")
+            
+            # Default to False
+            show_cmdline = False
+            
+            # Helper function to convert to bool properly
+            def to_bool(value):
+                if isinstance(value, bool):
+                    return value
+                if isinstance(value, str):
+                    return value.lower() in ('yes', 'true', 't', '1')
+                return bool(value)
+            
+            # Check both places for show_cmdline (for backward compatibility)
+            if "show_cmdline" in config_data:
+                print(f"ROOT SHOW_CMDLINE VALUE: {config_data['show_cmdline']} (TYPE: {type(config_data['show_cmdline'])})")
+                show_cmdline = to_bool(config_data["show_cmdline"])
+                logger.debug(f"Using show_cmdline from root config: {show_cmdline}")
+            elif "show_cmdline" in output_format:
+                print(f"OUTPUT_FORMAT SHOW_CMDLINE VALUE: {output_format['show_cmdline']} (TYPE: {type(output_format['show_cmdline'])})")
+                show_cmdline = to_bool(output_format["show_cmdline"])
+                logger.debug(f"Using show_cmdline from output_format: {show_cmdline}")
+            else:
+                logger.debug("No show_cmdline found in config, using default: False")
+                
+            # After all the checking, print the final value we'll use
+            print(f"\nFINAL SHOW_CMDLINE VALUE TO USE: {show_cmdline}")
+            
             self.config = Config(
                 search_keywords=config_data.get("search_keywords", []),
                 additional_fields=config_data.get("additional_fields", []),
@@ -113,8 +190,13 @@ class ESProcessAnalyzer:
                 indices=config_data.get("indices", [".ds-logs-system.security-*"]),
                 limit=config_data.get("limit", 1000),
                 timezone=config_data.get("timezone", "CET"),
-                output_format=config_data.get("output_format", {"tree": "text", "table": "text"})
+                output_format=output_format,
+                lineage=lineage_config,
+                show_cmdline=show_cmdline
             )
+            
+            logger.debug(f"Final config - show_cmdline: {self.config.show_cmdline}")
+            print(f"DIRECT CONFIG ACCESS VALUE: {self.config.show_cmdline}")
         except (json.JSONDecodeError, FileNotFoundError) as e:
             logger.error(f"Failed to load config: {e}")
             sys.exit(1)
@@ -134,7 +216,7 @@ class ESProcessAnalyzer:
                 [f"{self.es_protocol}://{self.es_host}:{self.es_port}"],
                 basic_auth=(self.es_username, self.es_password),
                 verify_certs=False if self.es_protocol == "https" else None,
-                timeout=60
+                request_timeout=60
             )
             if not self.es.ping():
                 raise ESConnectionError("Failed to connect to Elasticsearch")
@@ -143,6 +225,206 @@ class ESProcessAnalyzer:
             logger.error(f"Failed to connect to Elasticsearch: {e}")
             sys.exit(1)
             
+    def fetch_process_lineage(self, initial_logs: List[Dict]) -> List[Dict]:
+        """
+        Fetch all ancestors and descendants of matching processes.
+        Args:
+            initial_logs: List of logs that matched the search keywords
+        Returns:
+            List including initial logs plus their ancestors and descendants
+        """
+        if not self.config.lineage["fetch"]:
+            logger.info("Process lineage tracking disabled, only including direct matches")
+            return initial_logs
+            
+        logger.info("Fetching process lineage (parent/child processes)")
+        
+        # Initialize sets to track process IDs
+        matched_pids = set()  # PIDs from initial search results
+        to_fetch_pids = set()  # Parent/child PIDs that need fetching
+        fetched_pids = set()  # PIDs we've already fetched
+        
+        # Extract all PIDs from initial matches
+        for log in initial_logs:
+            source = log["_source"]
+            if "process" in source and "pid" in source["process"]:
+                pid = source["process"]["pid"]
+                matched_pids.add(pid)
+                
+                # Add parent PID to the fetch list if it exists
+                if "parent" in source["process"] and "pid" in source["process"]["parent"]:
+                    parent_pid = source["process"]["parent"]["pid"]
+                    to_fetch_pids.add(parent_pid)
+        
+        # Initialize the result with the initial logs
+        all_logs = list(initial_logs)
+        fetched_pids = set(matched_pids)  # Mark initial matches as fetched
+        
+        # Batch size for additional queries
+        batch_size = 1000
+        
+        # Function to fetch process by PIDs
+        def fetch_processes_by_pids(pids, matched_set, all_logs_list):
+            if not pids:
+                return set(), []  # Return empty sets if no PIDs to fetch
+                
+            # Convert PIDs set to list for the query
+            pid_list = list(pids)
+            logger.debug(f"Fetching {len(pid_list)} related processes")
+            
+            # Process PIDs in batches to avoid query size limits
+            new_related_pids = set()
+            new_logs = []
+            
+            with tqdm.tqdm(total=len(pid_list), desc="Fetching related processes") as pbar:
+                for i in range(0, len(pid_list), batch_size):
+                    batch = pid_list[i:i+batch_size]
+                    
+                    # Build the query for this batch
+                    query = {
+                        "bool": {
+                            "must": [
+                                {"range": {"@timestamp": {"gte": self.config.date_range["start"], "lte": self.config.date_range["end"]}}},
+                                {"exists": {"field": "process.pid"}},
+                                {"terms": {"process.pid": batch}}
+                            ]
+                        }
+                    }
+                    
+                    try:
+                        resp = self.es.search(
+                            index=self.config.indices,
+                            query=query,
+                            size=batch_size,
+                            _source_includes=["@timestamp", "process.*", "event.*", "user.*", "host.*", "winlog.*", "source.*", "destination.*"] + self.config.additional_fields
+                        )
+                        
+                        # Process results
+                        if "hits" in resp and "hits" in resp["hits"]:
+                            batch_logs = resp["hits"]["hits"]
+                            new_logs.extend(batch_logs)
+                            
+                            # Extract parent PIDs from these results
+                            for log in batch_logs:
+                                source = log["_source"]
+                                if "process" in source:
+                                    # Extract parent PID if it exists
+                                    if "parent" in source["process"] and "pid" in source["process"]["parent"]:
+                                        parent_pid = source["process"]["parent"]["pid"]
+                                        if parent_pid not in matched_set:
+                                            new_related_pids.add(parent_pid)
+                    except Exception as e:
+                        logger.error(f"Error fetching processes by PIDs: {e}")
+                    
+                    pbar.update(len(batch))
+            
+            return new_related_pids, new_logs
+        
+        # Fetch parent processes (ancestors)
+        if self.config.lineage["ancestors"]:
+            iterations = 0
+            max_iterations = 10  # Limit the number of iterations to prevent infinite loops
+            
+            while to_fetch_pids and iterations < max_iterations:
+                iterations += 1
+                logger.info(f"Ancestor iteration {iterations}: fetching {len(to_fetch_pids)} related parent processes")
+                
+                # Fetch this batch of PIDs
+                new_pids_to_fetch, new_logs = fetch_processes_by_pids(
+                    to_fetch_pids, fetched_pids, all_logs
+                )
+                
+                # Add new logs to our results
+                all_logs.extend(new_logs)
+                
+                # Mark these PIDs as fetched
+                fetched_pids.update(to_fetch_pids)
+                
+                # Prepare for next iteration with newly discovered PIDs
+                to_fetch_pids = set()
+                for pid in new_pids_to_fetch:
+                    if pid not in fetched_pids:
+                        to_fetch_pids.add(pid)
+        else:
+            logger.info("Skipping ancestors (parent processes) as configured")
+        
+        # Now fetch child processes (descendants) by searching for parent PIDs
+        if self.config.lineage["descendants"]:
+            iterations = 0
+            to_fetch_parent_pids = fetched_pids.copy()  # Start with all PIDs we've fetched so far
+            
+            while to_fetch_parent_pids and iterations < max_iterations:
+                iterations += 1
+                logger.info(f"Descendant iteration {iterations}: searching for children of {len(to_fetch_parent_pids)} processes")
+                
+                # Process parent PIDs in batches
+                pid_list = list(to_fetch_parent_pids)
+                new_child_pids = set()
+                new_logs = []
+                
+                with tqdm.tqdm(total=len(pid_list), desc="Fetching child processes") as pbar:
+                    for i in range(0, len(pid_list), batch_size):
+                        batch = pid_list[i:i+batch_size]
+                        
+                        # Build query to find children
+                        query = {
+                            "bool": {
+                                "must": [
+                                    {"range": {"@timestamp": {"gte": self.config.date_range["start"], "lte": self.config.date_range["end"]}}},
+                                    {"exists": {"field": "process.parent.pid"}},
+                                    {"terms": {"process.parent.pid": batch}}
+                                ]
+                            }
+                        }
+                        
+                        try:
+                            resp = self.es.search(
+                                index=self.config.indices,
+                                query=query,
+                                size=batch_size,
+                                _source_includes=["@timestamp", "process.*", "event.*", "user.*", "host.*", "winlog.*", "source.*", "destination.*"] + self.config.additional_fields
+                            )
+                            
+                            # Process results
+                            if "hits" in resp and "hits" in resp["hits"]:
+                                batch_logs = resp["hits"]["hits"]
+                                
+                                # Filter out logs we already have
+                                new_batch_logs = []
+                                for log in batch_logs:
+                                    log_id = log["_id"]
+                                    if not any(existing["_id"] == log_id for existing in all_logs):
+                                        new_batch_logs.append(log)
+                                
+                                new_logs.extend(new_batch_logs)
+                                
+                                # Extract child PIDs
+                                for log in new_batch_logs:
+                                    source = log["_source"]
+                                    if "process" in source and "pid" in source["process"]:
+                                        child_pid = source["process"]["pid"]
+                                        if child_pid not in fetched_pids:
+                                            new_child_pids.add(child_pid)
+                        except Exception as e:
+                            logger.error(f"Error fetching child processes: {e}")
+                        
+                        pbar.update(len(batch))
+                
+                # Add new logs to our results
+                all_logs.extend(new_logs)
+                
+                # Mark these parent PIDs as processed
+                to_fetch_parent_pids = set()
+                
+                # Add newly discovered child PIDs for next iteration
+                fetched_pids.update(new_child_pids)
+                to_fetch_parent_pids = new_child_pids
+        else:
+            logger.info("Skipping descendants (child processes) as configured")
+        
+        logger.info(f"Process lineage fetching complete. Found {len(all_logs)} total logs")
+        return all_logs
+    
     def search_logs(self, override_args=None) -> List[Dict]:
         """
         Search Elasticsearch for process events matching keywords.
@@ -162,6 +444,27 @@ class ESProcessAnalyzer:
                 self.config.indices = override_args.indices.split(',')
             if override_args.timezone:
                 self.config.timezone = override_args.timezone
+            # Apply lineage override options
+            if override_args.fetch_lineage is not None:
+                self.config.lineage["fetch"] = override_args.fetch_lineage
+            if override_args.include_ancestors is not None:
+                self.config.lineage["ancestors"] = override_args.include_ancestors
+            if override_args.include_descendants is not None:
+                self.config.lineage["descendants"] = override_args.include_descendants
+            if override_args.show_lineage_in_tree is not None:
+                self.config.lineage["show_in_tree"] = override_args.show_lineage_in_tree
+            if override_args.show_lineage_in_table is not None:
+                self.config.lineage["show_in_table"] = override_args.show_lineage_in_table
+            if override_args.include_lineage_in_csv is not None:
+                self.config.lineage["include_in_csv"] = override_args.include_lineage_in_csv
+                
+            # For backward compatibility
+            if hasattr(override_args, 'include_lineage') and override_args.include_lineage is not None:
+                self.config.lineage["fetch"] = override_args.include_lineage
+                
+            # Apply display options
+            if hasattr(override_args, 'show_cmdline') and override_args.show_cmdline is not None:
+                self.config.show_cmdline = override_args.show_cmdline
         
         # Remove duplicates from keywords
         self.config.search_keywords = list(set(self.config.search_keywords))
@@ -196,6 +499,7 @@ class ESProcessAnalyzer:
                 query=query,
                 size=1000,  # Batch size for scrolling
                 sort=["@timestamp"],
+                scroll="2m",  # Set the scroll timeout
                 _source_includes=["@timestamp", "process.*", "event.*", "user.*", "host.*", "winlog.*", "source.*", "destination.*"] + self.config.additional_fields
             )
             
@@ -213,20 +517,29 @@ class ESProcessAnalyzer:
                 scroll_id = resp.get("_scroll_id")
                 scroll_size = len(resp["hits"]["hits"])
                 
-                while scroll_size > 0 and len(results) < self.config.limit:
-                    page = self.es.scroll(scroll_id=scroll_id, scroll="2m")
-                    scroll_id = page["_scroll_id"]
-                    scroll_size = len(page["hits"]["hits"])
-                    results.extend(page["hits"]["hits"])
-                    pbar.update(min(scroll_size, self.config.limit - pbar.n))
-                    
-                    if len(results) >= self.config.limit:
-                        logger.info(f"Reached limit of {self.config.limit} results")
+                while scroll_id and scroll_size > 0 and len(results) < self.config.limit:
+                    try:
+                        page = self.es.scroll(scroll_id=scroll_id, scroll="2m")
+                        scroll_id = page.get("_scroll_id")
+                        scroll_size = len(page["hits"]["hits"])
+                        
+                        if scroll_size > 0:
+                            results.extend(page["hits"]["hits"])
+                            pbar.update(min(scroll_size, self.config.limit - pbar.n))
+                        
+                        if len(results) >= self.config.limit:
+                            logger.info(f"Reached limit of {self.config.limit} results")
+                            break
+                    except Exception as e:
+                        logger.error(f"Error during scroll operation: {e}")
                         break
                         
             # Clear scroll when done
             if scroll_id:
-                self.es.clear_scroll(scroll_id=scroll_id)
+                try:
+                    self.es.clear_scroll(scroll_id=scroll_id)
+                except Exception as e:
+                    logger.warning(f"Could not clear scroll: {e}")
                 
         except (ApiError, TransportError, ESConnectionError) as e:
             logger.error(f"Error searching Elasticsearch: {e}")
@@ -234,10 +547,17 @@ class ESProcessAnalyzer:
         except Exception as e:
             logger.error(f"Unexpected error during Elasticsearch search: {e}")
             sys.exit(1)
+        
+        initial_result_count = len(results)
+        logger.info(f"Retrieved {initial_result_count} logs matching keywords")
+        
+        # If process lineage is enabled, fetch all related processes
+        if self.config.lineage["fetch"] and results:
+            logger.info("Expanding search to include process lineage...")
+            results = self.fetch_process_lineage(results)
+            logger.info(f"After lineage expansion: {len(results)} total logs ({len(results) - initial_result_count} additional)")
             
-        logger.info(f"Retrieved {len(results)} log entries")
         return results
-    
     def build_processes(self, logs: List[Dict]) -> None:
         """
         Process log entries to build process objects.
@@ -251,8 +571,6 @@ class ESProcessAnalyzer:
                 if "process" not in source:
                     pbar.update(1)
                     continue
-                
-                # Extract process details
                 pid = source["process"].get("pid")
                 name = source["process"].get("name", "")
                 command_line = source["process"].get("command_line", "")
@@ -423,11 +741,22 @@ class ESProcessAnalyzer:
         
         return None
     
-    def display_process_tree(self, root_process: Process, indent: str = "", is_last: bool = True, highlight_keywords: bool = True) -> str:
+    def display_process_tree(self, root_process: Process, indent: str = "", is_last: bool = True, highlight_keywords: bool = True, is_lineage: bool = False, show_cmdline: bool = False) -> str:
         """
         Generate a text representation of a process tree.
         Returns the formatted tree as a string.
         """
+        # For debugging
+        if indent == "":
+            logger.debug(f"display_process_tree called with show_cmdline={show_cmdline}")
+            
+            # Direct override for debugging - if you want to force command line display
+            show_cmdline = True
+            
+        # Don't show lineage processes in the tree if disabled in config
+        if is_lineage and not self.config.lineage["show_in_tree"] and not root_process.matches:
+            return ""
+            
         # Sort children by timestamp
         children = sorted(root_process.children, key=lambda p: p.timestamp)
         
@@ -435,15 +764,26 @@ class ESProcessAnalyzer:
         branch = "└── " if is_last else "├── "
         
         # Format the current process node
-        process_info = f"{root_process.name} (PID: {root_process.pid}, Time: {root_process.timestamp.strftime('%Y-%m-%d %H:%M:%S')})"
+        time_str = root_process.timestamp.strftime('%Y-%m-%d %H:%M:%S')
+        process_info = f"{root_process.name} (PID: {root_process.pid}, Time: {time_str})"
+        
+        # Add command line if requested
+        cmdline_info = ""
+        if show_cmdline and root_process.command_line:
+            cmdline_info = f"\n{indent}{'    ' if is_last else '│   '}    CMD: {root_process.command_line}"
         
         # Highlight if process matches any keywords
         if highlight_keywords and root_process.matches:
             process_info = f"{Fore.RED}{process_info}{Style.RESET_ALL}"
             process_info += f" {Fore.YELLOW}[Matches: {', '.join(root_process.matches)}]{Style.RESET_ALL}"
+            if cmdline_info:
+                # Highlight matched keywords in command line
+                for keyword in root_process.matches:
+                    pattern = re.compile(re.escape(keyword), re.IGNORECASE)
+                    cmdline_info = pattern.sub(f"{Back.YELLOW}{Fore.BLACK}\\g<0>{Style.RESET_ALL}", cmdline_info)
         
         # Build the tree line
-        tree_line = indent + branch + process_info
+        tree_line = indent + branch + process_info + cmdline_info
         
         # Generate child nodes
         child_indent = indent + ("    " if is_last else "│   ")
@@ -451,11 +791,17 @@ class ESProcessAnalyzer:
         # Process children (all but the last)
         child_lines = []
         for i, child in enumerate(children[:-1]):
-            child_lines.append(self.display_process_tree(child, child_indent, False, highlight_keywords))
+            is_child_lineage = is_lineage or not child.matches
+            child_tree = self.display_process_tree(child, child_indent, False, highlight_keywords, is_child_lineage, show_cmdline)
+            if child_tree:  # Only add non-empty lines (might be empty if lineage is hidden)
+                child_lines.append(child_tree)
         
         # Process the last child if any
         if children:
-            child_lines.append(self.display_process_tree(children[-1], child_indent, True, highlight_keywords))
+            is_last_child_lineage = is_lineage or not children[-1].matches
+            child_tree = self.display_process_tree(children[-1], child_indent, True, highlight_keywords, is_last_child_lineage, show_cmdline)
+            if child_tree:  # Only add non-empty lines (might be empty if lineage is hidden)
+                child_lines.append(child_tree)
         
         # Combine the lines
         return "\n".join([tree_line] + child_lines)
@@ -467,6 +813,11 @@ class ESProcessAnalyzer:
         """
         # Flatten the process tree into a list of all processes
         all_processes = list(self.processes.values())
+        
+        # Filter out lineage processes if configured not to show them
+        if not self.config.lineage["show_in_table"]:
+            all_processes = [p for p in all_processes if p.matches]
+            logger.info(f"Filtered table to include only {len(all_processes)} directly matching processes")
         
         # Sort by timestamp
         all_processes.sort(key=lambda p: p.timestamp)
@@ -559,7 +910,14 @@ class ESProcessAnalyzer:
         Export the process table to a CSV file.
         """
         try:
-            df.to_csv(output_path, index=False)
+            # If configured not to include lineage in CSV, filter out non-matching rows
+            export_df = df.copy()
+            if not self.config.lineage["include_in_csv"]:
+                # Assuming 'Matches' column has comma-separated strings of matches
+                export_df = export_df[export_df['Matches'].str.len() > 0]
+                logger.info(f"Filtered CSV export to include only {len(export_df)} directly matching processes")
+                
+            export_df.to_csv(output_path, index=False)
             logger.info(f"Exported results to {output_path}")
         except Exception as e:
             logger.error(f"Failed to export to CSV: {e}")
@@ -584,10 +942,27 @@ class ESProcessAnalyzer:
         print(f"{Fore.CYAN}PROCESS TREES{Style.RESET_ALL}")
         print("="*80 + "\n")
         
+        # Direct check of config value
+        print(f"\nIN RUN METHOD - CONFIG SHOW_CMDLINE: {self.config.show_cmdline}")
+        
+        # Determine whether to show command lines
+        # Command line option takes precedence over config file
+        if args and hasattr(args, 'show_cmdline'):
+            show_cmdline = args.show_cmdline
+            logger.debug(f"Using show_cmdline from command line: {show_cmdline}")
+        else:
+            show_cmdline = self.config.show_cmdline
+            logger.debug(f"Using show_cmdline from config: {show_cmdline}")
+            
+        logger.info(f"Show command lines in tree: {show_cmdline}")         
+        
         for i, root_process in enumerate(self.process_trees):
             if i > 0:
                 print("\n" + "-"*80 + "\n")
-            print(self.display_process_tree(root_process))
+            print(self.display_process_tree(
+                root_process=root_process,
+                show_cmdline=show_cmdline
+            ))
         
         # Generate and display process table
         table = self.generate_process_table()
@@ -658,6 +1033,52 @@ Examples:
                            help="Maximum number of results to retrieve")
     search_group.add_argument("-i", "--indices", 
                            help="Elasticsearch indices to search (comma separated)")
+    # Add lineage control options
+    lineage_group = parser.add_argument_group('Process Lineage Options')
+    
+    # Lineage fetching options
+    lineage_fetch = lineage_group.add_mutually_exclusive_group()
+    lineage_fetch.add_argument("--lineage", dest="fetch_lineage", action="store_true",
+                             help="Enable process lineage fetching (default: on)")
+    lineage_fetch.add_argument("--no-lineage", dest="fetch_lineage", action="store_false",
+                             help="Disable process lineage fetching (only direct matches)")
+    lineage_group.set_defaults(fetch_lineage=None)
+    
+    # Ancestor/descendant options
+    lineage_group.add_argument("--ancestors", dest="include_ancestors", action="store_true",
+                             help="Include ancestor (parent) processes in lineage (default: on)")
+    lineage_group.add_argument("--no-ancestors", dest="include_ancestors", action="store_false",
+                             help="Exclude ancestor (parent) processes from lineage")
+    lineage_group.add_argument("--descendants", dest="include_descendants", action="store_true",
+                             help="Include descendant (child) processes in lineage (default: on)")
+    lineage_group.add_argument("--no-descendants", dest="include_descendants", action="store_false",
+                             help="Exclude descendant (child) processes from lineage")
+    lineage_group.set_defaults(include_ancestors=None, include_descendants=None)
+    
+    # Display options
+    lineage_group.add_argument("--lineage-in-tree", dest="show_lineage_in_tree", action="store_true",
+                             help="Show lineage in process trees (default: on)")
+    lineage_group.add_argument("--no-lineage-in-tree", dest="show_lineage_in_tree", action="store_false",
+                             help="Don't show lineage in process trees (direct matches only)")
+    lineage_group.add_argument("--lineage-in-table", dest="show_lineage_in_table", action="store_true",
+                             help="Show lineage in process tables (default: on)")
+    lineage_group.add_argument("--no-lineage-in-table", dest="show_lineage_in_table", action="store_false",
+                             help="Don't show lineage in process tables (direct matches only)")
+    lineage_group.add_argument("--lineage-in-csv", dest="include_lineage_in_csv", action="store_true",
+                             help="Include lineage in CSV export (default: on)")
+    lineage_group.add_argument("--no-lineage-in-csv", dest="include_lineage_in_csv", action="store_false",
+                             help="Don't include lineage in CSV export (direct matches only)")
+    lineage_group.set_defaults(show_lineage_in_tree=None, show_lineage_in_table=None, include_lineage_in_csv=None)
+    
+    # Display options
+    display_group = parser.add_argument_group('Display Options')
+    display_group.add_argument("--show-cmdline", dest="show_cmdline", action="store_true",
+                             help="Show command line for each process in the tree")
+    display_group.add_argument("--no-show-cmdline", dest="show_cmdline", action="store_false",
+                             help="Don't show command line in the tree (default)")
+    display_group.add_argument("--force-show-cmdline", dest="force_show_cmdline", action="store_true",
+                             help="Force showing command lines (override config issues)")
+    display_group.set_defaults(show_cmdline=False, force_show_cmdline=None)
     
     # Output options
     output_group.add_argument("-o", "--output", 
@@ -670,7 +1091,35 @@ Examples:
 def main():
     """Main entry point."""
     args = parse_args()
-    analyzer = ESProcessAnalyzer(args.config, args.debug)
+    
+    # Special handling for command line display - check config file directly
+    show_cmdline_from_config = False
+    try:
+        with open(args.config, 'r') as f:
+            config_data = json.load(f)
+            if "output_format" in config_data and "show_cmdline" in config_data["output_format"]:
+                show_cmdline_value = config_data["output_format"]["show_cmdline"]
+                if isinstance(show_cmdline_value, bool):
+                    show_cmdline_from_config = show_cmdline_value
+                elif isinstance(show_cmdline_value, str):
+                    show_cmdline_from_config = show_cmdline_value.lower() in ('yes', 'true', 't', '1')
+                else:
+                    show_cmdline_from_config = bool(show_cmdline_value)
+                print(f"Direct config read: show_cmdline = {show_cmdline_from_config}")
+    except Exception as e:
+        print(f"Error reading config file directly: {e}")
+    
+    # Command line overrides config
+    if args.force_show_cmdline:
+        force_cmdline = True
+    elif hasattr(args, 'show_cmdline') and args.show_cmdline:
+        force_cmdline = True
+    elif show_cmdline_from_config:
+        force_cmdline = True
+    else:
+        force_cmdline = None
+        
+    analyzer = ESProcessAnalyzer(args.config, args.debug, force_cmdline)
     analyzer.run(args)
 
 if __name__ == "__main__":
