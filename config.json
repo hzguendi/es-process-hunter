@@ -1,6 +1,13 @@
 {
   "search_keywords": [
-    "powershell"
+    "teamviewer",
+    "anydesk"
+  ],
+  "blacklist_keywords": [
+    "chrome",
+    "firefox",
+    "explorer.exe",
+    "splunk"
   ],
   "additional_fields": [
     "user.name",

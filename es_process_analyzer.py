@@ -66,6 +66,7 @@ class Process:
     dest_ip: Optional[str] = None
     source_port: Optional[int] = None
     dest_port: Optional[int] = None
+    blacklisted: bool = False  # Whether this process matches blacklist keywords
 
 @dataclass
 class Config:
@@ -77,6 +78,7 @@ class Config:
     limit: int
     timezone: str
     output_format: Dict[str, str]
+    blacklist_keywords: List[str] = field(default_factory=list)  # Keywords to exclude from results
     lineage: Dict[str, Any] = field(default_factory=lambda: {
         "fetch": True,          # Whether to fetch process lineage at all
         "ancestors": True,      # Include parent processes
@@ -200,6 +202,7 @@ class ESProcessAnalyzer:
             
             self.config = Config(
                 search_keywords=config_data.get("search_keywords", []),
+                blacklist_keywords=config_data.get("blacklist_keywords", []),
                 additional_fields=config_data.get("additional_fields", []),
                 date_range=config_data.get("date_range", {"start": "now-7d", "end": "now"}),
                 indices=config_data.get("indices", [".ds-logs-system.security-*"]),
@@ -455,6 +458,8 @@ class ESProcessAnalyzer:
                 self.config.date_range["end"] = override_args.to_date
             if override_args.keywords:
                 self.config.search_keywords.extend(override_args.keywords.split(','))
+            if override_args.blacklist:
+                self.config.blacklist_keywords.extend(override_args.blacklist.split(','))
             if override_args.limit:
                 self.config.limit = override_args.limit
             if override_args.indices:
@@ -584,6 +589,23 @@ class ESProcessAnalyzer:
             logger.info(f"After lineage expansion: {len(results)} total logs ({len(results) - initial_result_count} additional)")
             
         return results
+    def is_blacklisted(self, process: Process) -> bool:
+        """
+        Check if a process matches any blacklist keywords.
+        Returns True if the process should be excluded from direct results.
+        """
+        if not self.config.blacklist_keywords:
+            return False
+            
+        for keyword in self.config.blacklist_keywords:
+            keyword_lower = keyword.lower()
+            if (process.command_line and keyword_lower in process.command_line.lower()) or \
+               (process.name and keyword_lower in process.name.lower()) or \
+               (process.executable and keyword_lower in process.executable.lower()):
+                return True
+                
+        return False
+        
     def build_processes(self, logs: List[Dict]) -> None:
         """
         Process log entries to build process objects.
@@ -714,6 +736,12 @@ class ESProcessAnalyzer:
                     )
                     self.processes[pid] = process
                 
+                # Check if this process matches blacklist keywords
+                if self.is_blacklisted(process):
+                    process.blacklisted = True
+                    # If a process is blacklisted, we might want to log this for debugging
+                    logger.debug(f"Process {process.name} (PID: {process.pid}) matches blacklist keywords")
+                
                 # Decode encoded PowerShell commands
                 if command_line and ("-enc" in command_line.lower() or "-encodedcommand" in command_line.lower()):
                     process.decoded_command = self.decode_powershell_command(command_line)
@@ -735,10 +763,34 @@ class ESProcessAnalyzer:
                 pbar.update(1)
         
         # Find root processes (those without a parent in our dataset)
+        # If a process is blacklisted, only include it as a root if it's part of a lineage
+        # This means we only show blacklisted processes if they are related to non-blacklisted ones
         self.process_trees = []
+        
+        # Helper function to check if process or any child has matches but is not blacklisted
+        def has_valid_match(proc):
+            # If this process has matches and is not blacklisted, it's valid
+            if proc.matches and not proc.blacklisted:
+                return True
+                
+            # Otherwise, check all descendants
+            return any(has_valid_match(child) for child in proc.children)
+        
+        # Find root processes and filter out standalone blacklisted ones
         for pid, process in self.processes.items():
             if not process.parent_pid or process.parent_pid not in self.processes:
-                self.process_trees.append(process)
+                # If process is blacklisted, only keep it if part of lineage with valid matches
+                if process.blacklisted:
+                    if has_valid_match(process):
+                        self.process_trees.append(process)
+                        logger.debug(f"Including blacklisted root process {process.name} (PID: {process.pid}) as part of lineage")
+                    else:
+                        logger.debug(f"Excluding standalone blacklisted root process {process.name} (PID: {process.pid})")
+                else:
+                    self.process_trees.append(process)
+        
+        # Sort trees by timestamp
+        self.process_trees.sort(key=lambda p: p.timestamp)
         
         logger.info(f"Built {len(self.process_trees)} process trees")
     
@@ -805,8 +857,19 @@ class ESProcessAnalyzer:
         if show_cmdline and root_process.command_line:
             cmdline_info = f"\n{indent}{'    ' if is_last else '│   '}    CMD: {root_process.command_line}"
         
-        # Highlight if process matches any keywords
-        if highlight_keywords and root_process.matches:
+        # Indicate blacklisted process but still highlight search keywords if present
+        if root_process.blacklisted:
+            process_info = f"{Fore.MAGENTA}[BLACKLISTED] {process_info}{Style.RESET_ALL}"
+            # Still highlight specific matches in blacklisted processes
+            if highlight_keywords and root_process.matches:
+                process_info += f" {Fore.YELLOW}[Matches: {', '.join(root_process.matches)}]{Style.RESET_ALL}"
+                if cmdline_info:
+                    # Highlight matched keywords in command line
+                    for keyword in root_process.matches:
+                        pattern = re.compile(re.escape(keyword), re.IGNORECASE)
+                        cmdline_info = pattern.sub(f"{Back.YELLOW}{Fore.BLACK}\\g<0>{Style.RESET_ALL}", cmdline_info)
+        # Regular highlight for non-blacklisted processes
+        elif highlight_keywords and root_process.matches:
             process_info = f"{Fore.RED}{process_info}{Style.RESET_ALL}"
             process_info += f" {Fore.YELLOW}[Matches: {', '.join(root_process.matches)}]{Style.RESET_ALL}"
             if cmdline_info:
@@ -852,6 +915,19 @@ class ESProcessAnalyzer:
             all_processes = [p for p in all_processes if p.matches]
             logger.info(f"Filtered table to include only {len(all_processes)} directly matching processes")
         
+        # Filter out blacklisted processes that don't have matches or are not part of lineage
+        filtered_processes = []
+        for process in all_processes:
+            # Include non-blacklisted processes
+            if not process.blacklisted:
+                filtered_processes.append(process)
+            # For blacklisted processes, only include if they have matches (they're part of lineage)
+            elif process.matches:
+                filtered_processes.append(process)
+                
+        logger.info(f"Filtered out {len(all_processes) - len(filtered_processes)} blacklisted processes")
+        all_processes = filtered_processes
+        
         # Sort by timestamp
         all_processes.sort(key=lambda p: p.timestamp)
         
@@ -880,6 +956,9 @@ class ESProcessAnalyzer:
                 if field in row:
                     continue
                 row[field] = value
+            
+            # Mark blacklisted processes
+            row["Blacklisted"] = "Yes" if process.blacklisted else "No"
             
             table_data.append(row)
         
@@ -918,6 +997,10 @@ class ESProcessAnalyzer:
         if highlight_keywords:
             # Apply highlighting to each row
             for i, row in display_df.iterrows():
+                # Highlight blacklisted processes
+                if row["Blacklisted"] == "Yes":
+                    display_df.at[i, "Blacklisted"] = f"{Fore.MAGENTA}{row['Blacklisted']}{Style.RESET_ALL}"
+                    
                 if row["Matches"]:
                     keywords = row["Matches"].split(", ")
                     
@@ -1079,6 +1162,8 @@ Examples:
     # Search options
     search_group.add_argument("-k", "--keywords", 
                            help="Additional search keywords (comma separated)")
+    search_group.add_argument("-b", "--blacklist", 
+                           help="Keywords to exclude from results (comma separated)")
     search_group.add_argument("-f", "--from-date", 
                            help="Start date (YYYY-MM-DD or Elasticsearch date math like 'now-7d')")
     search_group.add_argument("-t", "--to-date", 

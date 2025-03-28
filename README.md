@@ -57,6 +57,7 @@ A tool for analyzing Windows process logs in Elasticsearch to identify suspiciou
 ```json
 {
   "search_keywords": ["powershell", "cmd.exe", "-enc", "rundll32"],
+  "blacklist_keywords": ["chrome.exe", "explorer.exe", "firefox.exe"],
   "additional_fields": ["user.name", "host.name", "winlog.event_data.SubjectUserName"],
   "date_range": {
     "start": "now-7d",
@@ -82,6 +83,7 @@ A tool for analyzing Windows process logs in Elasticsearch to identify suspiciou
 ```
 
 - `search_keywords`: List of keywords to search for in process details
+- `blacklist_keywords`: List of keywords to exclude from direct results (processes with these keywords will be shown only if part of lineage)
 - `additional_fields`: Extra fields to include in the results table
 - `date_range`: Time range for the search (using Elasticsearch date syntax)
 - `indices`: Elasticsearch indices to search in
@@ -115,6 +117,7 @@ python es_process_analyzer.py [options]
 - `-f`, `--from-date`: Override start date from config (format: YYYY-MM-DD or Elasticsearch date math)
 - `-t`, `--to-date`: Override end date from config (format: YYYY-MM-DD or Elasticsearch date math)
 - `-k`, `--keywords`: Additional keywords to search for (comma separated)
+- `-b`, `--blacklist`: Keywords to exclude from results (comma separated)
 - `-l`, `--limit`: Maximum number of results to retrieve
 - `-i`, `--indices`: Elasticsearch indices to search (comma separated)
 
@@ -189,6 +192,11 @@ python es_process_analyzer.py --show-ports -k "svchost,dns,http"
 Show only source ports in process trees:
 ```bash
 python es_process_analyzer.py --show-source-port -k "netcat,powershell"
+```
+
+Search for suspicious processes while excluding common browsers:
+```bash
+python es_process_analyzer.py -k "cmd.exe,powershell" -b "chrome.exe,firefox.exe,msedge.exe"
 ```
 
 Search in specific indices:
