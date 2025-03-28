@@ -92,6 +92,8 @@ A tool for analyzing Windows process logs in Elasticsearch to identify suspiciou
   - `table`: Table output format ("text")
   - `csv_path`: Path for CSV export
   - `show_cmdline`: Whether to show command lines in process trees (default: false)
+  - `show_source_port`: Whether to show source ports in process trees (default: false)
+  - `show_dest_port`: Whether to show destination ports in process trees (default: false)
 - `lineage`: Process lineage configuration
   - `fetch`: Whether to fetch process lineage at all (default: true)
   - `ancestors`: Include parent/ancestor processes (default: true)
@@ -133,6 +135,11 @@ python es_process_analyzer.py [options]
 **Display Options:**
 - `--show-cmdline`: Show command line for each process in the tree
 - `--no-show-cmdline`: Don't show command line in the tree (default)
+- `--show-source-port`: Show source port for each process in the tree if available
+- `--no-show-source-port`: Don't show source port in the tree (default)
+- `--show-dest-port`: Show destination port for each process in the tree if available
+- `--no-show-dest-port`: Don't show destination port in the tree (default)
+- `--show-ports`: Show both source and destination ports (shorthand for --show-source-port --show-dest-port)
 - `--csv`: Export table to CSV with specified filename
 - `--timezone`: Override timezone (default: CET)
 - `-c`, `--config`: Path to configuration file (default: config.json)
@@ -172,6 +179,16 @@ python es_process_analyzer.py --lineage-in-tree --no-lineage-in-table --no-linea
 Show full command lines in the process tree for better analysis:
 ```bash
 python es_process_analyzer.py --show-cmdline -k "powershell,-enc"
+```
+
+Show network port information in the process tree for network activity analysis:
+```bash
+python es_process_analyzer.py --show-ports -k "svchost,dns,http"
+```
+
+Show only source ports in process trees:
+```bash
+python es_process_analyzer.py --show-source-port -k "netcat,powershell"
 ```
 
 Search in specific indices:

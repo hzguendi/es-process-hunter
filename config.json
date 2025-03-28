@@ -1,9 +1,6 @@
 {
   "search_keywords": [
-    "taskschd",
-    "rundll32",
-    "teamviewer",
-    "anydesk"
+    "powershell"
   ],
   "additional_fields": [
     "user.name",
@@ -26,7 +23,9 @@
     "tree": "text",
     "table": "text",
     "csv_path": "output/output.csv",
-    "show_cmdline": true
+    "show_cmdline": true,
+    "show_source_port": true,
+    "show_dest_port": true
   },
   "lineage": {
     "fetch": true,

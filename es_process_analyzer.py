@@ -86,6 +86,8 @@ class Config:
         "include_in_csv": True  # Include lineage in CSV export
     })
     show_cmdline: bool = False  # Whether to show command lines in process trees
+    show_source_port: bool = False  # Whether to show source ports in process trees
+    show_dest_port: bool = False  # Whether to show destination ports in process trees
 
 class ESProcessAnalyzer:
     """Main class for analyzing processes in Elasticsearch logs."""
@@ -183,6 +185,19 @@ class ESProcessAnalyzer:
             # After all the checking, print the final value we'll use
             print(f"\nFINAL SHOW_CMDLINE VALUE TO USE: {show_cmdline}")
             
+            # Read port display options from config
+            show_source_port = False
+            show_dest_port = False
+            if "show_source_port" in config_data:
+                show_source_port = to_bool(config_data["show_source_port"])
+            elif "show_source_port" in output_format:
+                show_source_port = to_bool(output_format["show_source_port"])
+                
+            if "show_dest_port" in config_data:
+                show_dest_port = to_bool(config_data["show_dest_port"])
+            elif "show_dest_port" in output_format:
+                show_dest_port = to_bool(output_format["show_dest_port"])
+            
             self.config = Config(
                 search_keywords=config_data.get("search_keywords", []),
                 additional_fields=config_data.get("additional_fields", []),
@@ -192,7 +207,9 @@ class ESProcessAnalyzer:
                 timezone=config_data.get("timezone", "CET"),
                 output_format=output_format,
                 lineage=lineage_config,
-                show_cmdline=show_cmdline
+                show_cmdline=show_cmdline,
+                show_source_port=show_source_port,
+                show_dest_port=show_dest_port
             )
             
             logger.debug(f"Final config - show_cmdline: {self.config.show_cmdline}")
@@ -465,6 +482,15 @@ class ESProcessAnalyzer:
             # Apply display options
             if hasattr(override_args, 'show_cmdline') and override_args.show_cmdline is not None:
                 self.config.show_cmdline = override_args.show_cmdline
+            
+            # Apply port display options
+            if hasattr(override_args, 'show_ports') and override_args.show_ports:
+                self.config.show_source_port = True
+                self.config.show_dest_port = True
+            if hasattr(override_args, 'show_source_port') and override_args.show_source_port is not None:
+                self.config.show_source_port = override_args.show_source_port
+            if hasattr(override_args, 'show_dest_port') and override_args.show_dest_port is not None:
+                self.config.show_dest_port = override_args.show_dest_port
         
         # Remove duplicates from keywords
         self.config.search_keywords = list(set(self.config.search_keywords))
@@ -767,6 +793,13 @@ class ESProcessAnalyzer:
         time_str = root_process.timestamp.strftime('%Y-%m-%d %H:%M:%S')
         process_info = f"{root_process.name} (PID: {root_process.pid}, Time: {time_str})"
         
+        # Add network port information if requested and available
+        if self.config.show_source_port and root_process.source_port:
+            process_info += f", {Fore.CYAN}SrcPort: {root_process.source_port}{Style.RESET_ALL}"
+            
+        if self.config.show_dest_port and root_process.dest_port:
+            process_info += f", {Fore.CYAN}DstPort: {root_process.dest_port}{Style.RESET_ALL}"
+        
         # Add command line if requested
         cmdline_info = ""
         if show_cmdline and root_process.command_line:
@@ -954,7 +987,28 @@ class ESProcessAnalyzer:
             show_cmdline = self.config.show_cmdline
             logger.debug(f"Using show_cmdline from config: {show_cmdline}")
             
-        logger.info(f"Show command lines in tree: {show_cmdline}")         
+        logger.info(f"Show command lines in tree: {show_cmdline}")
+        
+        # Handle port display options
+        if args:
+            # Handle the shorthand --show-ports flag which enables both source and dest ports
+            if hasattr(args, 'show_ports') and args.show_ports:
+                self.config.show_source_port = True
+                self.config.show_dest_port = True
+                logger.debug("Enabled both source and destination ports via --show-ports")
+            
+            # Handle individual port options that override the config
+            if hasattr(args, 'show_source_port') and args.show_source_port is not None:
+                self.config.show_source_port = args.show_source_port
+                logger.debug(f"Set show_source_port from command line: {args.show_source_port}")
+                
+            if hasattr(args, 'show_dest_port') and args.show_dest_port is not None:
+                self.config.show_dest_port = args.show_dest_port
+                logger.debug(f"Set show_dest_port from command line: {args.show_dest_port}")
+        
+        # Log port display settings
+        logger.info(f"Show source ports in tree: {self.config.show_source_port}")
+        logger.info(f"Show destination ports in tree: {self.config.show_dest_port}")         
         
         for i, root_process in enumerate(self.process_trees):
             if i > 0:
@@ -1078,7 +1132,18 @@ Examples:
                              help="Don't show command line in the tree (default)")
     display_group.add_argument("--force-show-cmdline", dest="force_show_cmdline", action="store_true",
                              help="Force showing command lines (override config issues)")
-    display_group.set_defaults(show_cmdline=False, force_show_cmdline=None)
+    display_group.add_argument("--show-source-port", dest="show_source_port", action="store_true",
+                             help="Show source port for each process in the tree if available")
+    display_group.add_argument("--no-show-source-port", dest="show_source_port", action="store_false",
+                             help="Don't show source port in the tree (default)")
+    display_group.add_argument("--show-dest-port", dest="show_dest_port", action="store_true",
+                             help="Show destination port for each process in the tree if available")
+    display_group.add_argument("--no-show-dest-port", dest="show_dest_port", action="store_false",
+                             help="Don't show destination port in the tree (default)")
+    display_group.add_argument("--show-ports", dest="show_ports", action="store_true",
+                             help="Show both source and destination ports (shorthand)")
+    display_group.set_defaults(show_cmdline=False, force_show_cmdline=None, 
+                              show_source_port=None, show_dest_port=None, show_ports=None)
     
     # Output options
     output_group.add_argument("-o", "--output", 
