@@ -1058,6 +1058,125 @@ class ESProcessAnalyzer:
         except Exception as e:
             logger.error(f"Failed to export process trees to file: {e}")
     
+    def list_index_fields(self, indices: List[str]) -> None:
+        """
+        List all fields/columns in the specified Elasticsearch indices.
+        
+        Args:
+            indices: List of index patterns to analyze
+        """
+        logger.info(f"Retrieving field mappings for indices matching: {', '.join(indices)}")
+        
+        # Get all indices matching the patterns
+        try:
+            all_indices = []
+            for pattern in indices:
+                matching_indices = list(self.es.indices.get(index=pattern).keys())
+                all_indices.extend(matching_indices)
+            
+            # Remove duplicates and sort
+            all_indices = sorted(set(all_indices))
+            logger.info(f"Found {len(all_indices)} indices matching the patterns")
+            
+            if not all_indices:
+                logger.error("No indices found matching the patterns")
+                return
+            
+            # For each index, get and display field mappings
+            for index in all_indices:
+                print(f"\n{'=' * 80}")
+                print(f"{Fore.CYAN}FIELDS IN INDEX: {index}{Style.RESET_ALL}")
+                print(f"{'-' * 80}\n")
+                
+                try:
+                    # Get index mapping
+                    mapping = self.es.indices.get_mapping(index=index)
+                    
+                    # Process the mapping to extract fields
+                    fields = self._extract_fields_from_mapping(mapping[index])
+                    
+                    if not fields:
+                        print("No fields found in mapping")
+                        continue
+                    
+                    # Display fields sorted alphabetically with their types
+                    for field_path, field_type in sorted(fields.items()):
+                        print(f"{Fore.GREEN}{field_path}{Style.RESET_ALL}: {field_type}")
+                        
+                    print(f"\nTotal fields: {len(fields)}")
+                    
+                except Exception as e:
+                    logger.error(f"Error retrieving mapping for index {index}: {e}")
+                    
+        except Exception as e:
+            logger.error(f"Error retrieving indices: {e}")
+    
+    def _extract_fields_from_mapping(self, mapping: Dict, prefix: str = '', result: Dict = None) -> Dict[str, str]:
+        """
+        Recursively extract fields from Elasticsearch mapping.
+        
+        Args:
+            mapping: The Elasticsearch mapping dictionary
+            prefix: Prefix for nested fields
+            result: Dictionary to store results
+            
+        Returns:
+            Dictionary mapping field paths to their types
+        """
+        if result is None:
+            result = {}
+        
+        # Get properties from mapping
+        properties = None
+        
+        # Try to find properties in the mapping structure
+        if 'mappings' in mapping:
+            if 'properties' in mapping['mappings']:
+                properties = mapping['mappings']['properties']
+            else:
+                # Handle different mapping structures
+                for key, value in mapping['mappings'].items():
+                    if isinstance(value, dict) and 'properties' in value:
+                        properties = value['properties']
+                        break
+        
+        if not properties:
+            return result
+        
+        # Process each property
+        for field_name, field_info in properties.items():
+            field_path = f"{prefix}{field_name}"
+            
+            # Handle nested objects/fields
+            if 'properties' in field_info:
+                # Field with nested properties
+                result[field_path] = "object"
+                self._extract_fields_from_mapping({'mappings': {'properties': field_info['properties']}}, f"{field_path}.", result)
+            elif 'type' in field_info:
+                # Field with a type
+                field_type = field_info['type']
+                additional_info = []
+                
+                # Add format information if available
+                if 'format' in field_info:
+                    additional_info.append(f"format={field_info['format']}")
+                
+                # Add other relevant field attributes
+                for attr in ['analyzer', 'normalizer', 'index']:
+                    if attr in field_info:
+                        additional_info.append(f"{attr}={field_info[attr]}")
+                
+                # Combine type with additional information
+                if additional_info:
+                    field_type = f"{field_type} ({', '.join(additional_info)})"
+                
+                result[field_path] = field_type
+            else:
+                # Field without a specific type
+                result[field_path] = "unknown"
+        
+        return result
+
     def run(self, args=None) -> None:
         """
         Run the full analysis workflow.
@@ -1270,6 +1389,8 @@ Examples:
                            help="Export table to CSV with specified filename")
     output_group.add_argument("--tree-out",
                            help="Export process tree to plain text file with specified filename (without color codes)")
+    output_group.add_argument("--list-fields", action="store_true",
+                           help="Only list all possible fields/columns in each index without performing any search")
     
     return parser.parse_args()
 
@@ -1305,7 +1426,15 @@ def main():
         force_cmdline = None
         
     analyzer = ESProcessAnalyzer(args.config, args.debug, force_cmdline)
-    analyzer.run(args)
+    
+    # If --list-fields flag is provided, just list fields without performing search
+    if args.list_fields:
+        # Use indices from config or override from command line
+        indices = args.indices.split(',') if args.indices else analyzer.config.indices
+        analyzer.list_index_fields(indices)
+    else:
+        # Run the regular analysis workflow
+        analyzer.run(args)
 
 if __name__ == "__main__":
     main()

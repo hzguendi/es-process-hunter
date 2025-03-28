@@ -1,6 +1,7 @@
 {
   "search_keywords": [
-    "svchost"
+    "kernel32.dll",
+    "iodine"
   ],
   "blacklist_keywords": [
     "chrome",

@@ -146,6 +146,7 @@ python es_process_analyzer.py [options]
 - `--show-ports`: Show both source and destination ports (shorthand for --show-source-port --show-dest-port)
 - `--csv`: Export table to CSV with specified filename
 - `--tree-out`: Export process tree to plain text file with specified filename (without color codes)
+- `--list-fields`: Only list all possible fields/columns in each index without performing any search
 - `--timezone`: Override timezone (default: CET)
 - `-c`, `--config`: Path to configuration file (default: config.json)
 
@@ -209,6 +210,11 @@ python es_process_analyzer.py --tree-out output/analysis.txt -k "svchost,powersh
 Search in specific indices:
 ```bash
 python es_process_analyzer.py -i ".ds-logs-windows.sysmon_operational-*"
+```
+
+List all possible fields/columns in each index without performing any search:
+```bash
+python es_process_analyzer.py --list-fields -i ".ds-logs-windows.sysmon_operational-*"
 ```
 
 ## Output
