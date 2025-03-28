@@ -1,0 +1,29 @@
+{
+  "search_keywords": [
+    "rundll32",
+    "teamviewer",
+    "anydesk"
+  ],
+  "additional_fields": [
+    "user.name",
+    "host.name",
+    "winlog.event_data.SubjectUserName",
+    "winlog.channel",
+    "event.code"
+  ],
+  "date_range": {
+    "start": "now-50d",
+    "end": "now-25d"
+  },
+  "indices": [
+    ".ds-logs-system.security-*",
+    ".ds-logs-windows.sysmon_operational-*"
+  ],
+  "limit": 10000,
+  "timezone": "CET",
+  "output_format": {
+    "tree": "text",
+    "table": "text",
+    "csv_path": "output/output.csv"
+  }
+}
